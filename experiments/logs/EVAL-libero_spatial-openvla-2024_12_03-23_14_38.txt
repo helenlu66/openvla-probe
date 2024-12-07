@@ -1,0 +1,111 @@
+Task suite: libero_spatial
+
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+Starting episode 1...
+Saving per-action data for episode 1...
+Per-action embeddings and labels saved to: ./experiments/logs/episode_1.pt
+Saved rollout MP4 at path ./rollouts/2024_12_03/2024_12_03-23_14_38--episode=1--success=True--task=pick_up_the_black_bowl_between_the_plate_and_the_r.mp4
+Success: True
+# episodes completed so far: 1
+# successes: 1 (100.0%)
+Current task success rate: 1.0
+Current total success rate: 1.0
+
+Task: pick up the black bowl next to the ramekin and place it on the plate
+Starting episode 1...
+Saving per-action data for episode 2...
+Per-action embeddings and labels saved to: ./experiments/logs/episode_2.pt
+Saved rollout MP4 at path ./rollouts/2024_12_03/2024_12_03-23_14_38--episode=2--success=True--task=pick_up_the_black_bowl_next_to_the_ramekin_and_pla.mp4
+Success: True
+# episodes completed so far: 2
+# successes: 2 (100.0%)
+Current task success rate: 1.0
+Current total success rate: 1.0
+
+Task: pick up the black bowl from table center and place it on the plate
+Starting episode 1...
+Saving per-action data for episode 3...
+Per-action embeddings and labels saved to: ./experiments/logs/episode_3.pt
+Saved rollout MP4 at path ./rollouts/2024_12_03/2024_12_03-23_14_38--episode=3--success=False--task=pick_up_the_black_bowl_from_table_center_and_place.mp4
+Success: False
+# episodes completed so far: 3
+# successes: 2 (66.7%)
+Current task success rate: 0.0
+Current total success rate: 0.6666666666666666
+
+Task: pick up the black bowl on the cookie box and place it on the plate
+Starting episode 1...
+Saving per-action data for episode 4...
+Per-action embeddings and labels saved to: ./experiments/logs/episode_4.pt
+Saved rollout MP4 at path ./rollouts/2024_12_03/2024_12_03-23_14_38--episode=4--success=True--task=pick_up_the_black_bowl_on_the_cookie_box_and_place.mp4
+Success: True
+# episodes completed so far: 4
+# successes: 3 (75.0%)
+Current task success rate: 1.0
+Current total success rate: 0.75
+
+Task: pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate
+Starting episode 1...
+Saving per-action data for episode 5...
+Per-action embeddings and labels saved to: ./experiments/logs/episode_5.pt
+Saved rollout MP4 at path ./rollouts/2024_12_03/2024_12_03-23_14_38--episode=5--success=True--task=pick_up_the_black_bowl_in_the_top_drawer_of_the_wo.mp4
+Success: True
+# episodes completed so far: 5
+# successes: 4 (80.0%)
+Current task success rate: 1.0
+Current total success rate: 0.8
+
+Task: pick up the black bowl on the ramekin and place it on the plate
+Starting episode 1...
+Saving per-action data for episode 6...
+Per-action embeddings and labels saved to: ./experiments/logs/episode_6.pt
+Saved rollout MP4 at path ./rollouts/2024_12_03/2024_12_03-23_14_38--episode=6--success=True--task=pick_up_the_black_bowl_on_the_ramekin_and_place_it.mp4
+Success: True
+# episodes completed so far: 6
+# successes: 5 (83.3%)
+Current task success rate: 1.0
+Current total success rate: 0.8333333333333334
+
+Task: pick up the black bowl next to the cookie box and place it on the plate
+Starting episode 1...
+Saving per-action data for episode 7...
+Per-action embeddings and labels saved to: ./experiments/logs/episode_7.pt
+Saved rollout MP4 at path ./rollouts/2024_12_03/2024_12_03-23_14_38--episode=7--success=True--task=pick_up_the_black_bowl_next_to_the_cookie_box_and_.mp4
+Success: True
+# episodes completed so far: 7
+# successes: 6 (85.7%)
+Current task success rate: 1.0
+Current total success rate: 0.8571428571428571
+
+Task: pick up the black bowl on the stove and place it on the plate
+Starting episode 1...
+Saving per-action data for episode 8...
+Per-action embeddings and labels saved to: ./experiments/logs/episode_8.pt
+Saved rollout MP4 at path ./rollouts/2024_12_03/2024_12_03-23_14_38--episode=8--success=True--task=pick_up_the_black_bowl_on_the_stove_and_place_it_o.mp4
+Success: True
+# episodes completed so far: 8
+# successes: 7 (87.5%)
+Current task success rate: 1.0
+Current total success rate: 0.875
+
+Task: pick up the black bowl next to the plate and place it on the plate
+Starting episode 1...
+Saving per-action data for episode 9...
+Per-action embeddings and labels saved to: ./experiments/logs/episode_9.pt
+Saved rollout MP4 at path ./rollouts/2024_12_03/2024_12_03-23_14_38--episode=9--success=True--task=pick_up_the_black_bowl_next_to_the_plate_and_place.mp4
+Success: True
+# episodes completed so far: 9
+# successes: 8 (88.9%)
+Current task success rate: 1.0
+Current total success rate: 0.8888888888888888
+
+Task: pick up the black bowl on the wooden cabinet and place it on the plate
+Starting episode 1...
+Saving per-action data for episode 10...
+Per-action embeddings and labels saved to: ./experiments/logs/episode_10.pt
+Saved rollout MP4 at path ./rollouts/2024_12_03/2024_12_03-23_14_38--episode=10--success=True--task=pick_up_the_black_bowl_on_the_wooden_cabinet_and_p.mp4
+Success: True
+# episodes completed so far: 10
+# successes: 9 (90.0%)
+Current task success rate: 1.0
+Current total success rate: 0.9

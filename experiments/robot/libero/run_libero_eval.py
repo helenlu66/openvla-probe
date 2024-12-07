@@ -30,6 +30,24 @@ from libero.libero import benchmark
 
 import wandb
 
+import json
+
+import torch
+
+from detection.pick_place_detector import PickPlaceDetector
+
+def serialize_obs(obs):
+    """
+    Convert observations containing NumPy arrays to JSON-serializable format.
+    """
+    if isinstance(obs, dict):
+        return {k: serialize_obs(v) for k, v in obs.items()}
+    elif isinstance(obs, np.ndarray):
+        return obs.tolist()
+    else:
+        return obs
+
+
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
 from experiments.robot.libero.libero_utils import (
@@ -39,7 +57,7 @@ from experiments.robot.libero.libero_utils import (
     quat2axisangle,
     save_rollout_video,
 )
-from experiments.robot.openvla_utils import get_processor
+from experiments.robot.openvla_utils import get_processor, get_vla_action
 from experiments.robot.robot_utils import (
     DATE_TIME,
     get_action,
@@ -49,6 +67,120 @@ from experiments.robot.robot_utils import (
     normalize_gripper_action,
     set_seed_everywhere,
 )
+
+
+# Define all possible symbolic state keys
+ALL_SYMBOLS = [
+ 'grasped akita_black_bowl_1',
+ 'grasped akita_black_bowl_2',
+ 'grasped cookies_1',
+ 'grasped glazed_rim_porcelain_ramekin_1',
+ 'grasped plate_1',
+ 'on-table akita_black_bowl_1',
+ 'on-table akita_black_bowl_2',
+ 'on-table cookies_1',
+ 'on-table glazed_rim_porcelain_ramekin_1',
+ 'on-table plate_1',
+ 'on-table flat_stove_1',
+ 'on-table wooden_cabinet_1',
+ 'on akita_black_bowl_1 akita_black_bowl_1',
+ 'on akita_black_bowl_1 akita_black_bowl_2',
+ 'on akita_black_bowl_1 cookies_1',
+ 'on akita_black_bowl_1 glazed_rim_porcelain_ramekin_1',
+ 'on akita_black_bowl_1 plate_1',
+ 'on akita_black_bowl_1 flat_stove_1',
+ 'on akita_black_bowl_1 wooden_cabinet_1',
+ 'on akita_black_bowl_2 akita_black_bowl_1',
+ 'on akita_black_bowl_2 akita_black_bowl_2',
+ 'on akita_black_bowl_2 cookies_1',
+ 'on akita_black_bowl_2 glazed_rim_porcelain_ramekin_1',
+ 'on akita_black_bowl_2 plate_1',
+ 'on akita_black_bowl_2 flat_stove_1',
+ 'on akita_black_bowl_2 wooden_cabinet_1',
+ 'on cookies_1 akita_black_bowl_1',
+ 'on cookies_1 akita_black_bowl_2',
+ 'on cookies_1 cookies_1',
+ 'on cookies_1 glazed_rim_porcelain_ramekin_1',
+ 'on cookies_1 plate_1',
+ 'on cookies_1 flat_stove_1',
+ 'on cookies_1 wooden_cabinet_1',
+ 'on glazed_rim_porcelain_ramekin_1 akita_black_bowl_1',
+ 'on glazed_rim_porcelain_ramekin_1 akita_black_bowl_2',
+ 'on glazed_rim_porcelain_ramekin_1 cookies_1',
+ 'on glazed_rim_porcelain_ramekin_1 glazed_rim_porcelain_ramekin_1',
+ 'on glazed_rim_porcelain_ramekin_1 plate_1',
+ 'on glazed_rim_porcelain_ramekin_1 flat_stove_1',
+ 'on glazed_rim_porcelain_ramekin_1 wooden_cabinet_1',
+ 'on plate_1 akita_black_bowl_1',
+ 'on plate_1 akita_black_bowl_2',
+ 'on plate_1 cookies_1',
+ 'on plate_1 glazed_rim_porcelain_ramekin_1',
+ 'on plate_1 plate_1',
+ 'on plate_1 flat_stove_1',
+ 'on plate_1 wooden_cabinet_1',
+ 'on flat_stove_1 akita_black_bowl_1',
+ 'on flat_stove_1 akita_black_bowl_2',
+ 'on flat_stove_1 cookies_1',
+ 'on flat_stove_1 glazed_rim_porcelain_ramekin_1',
+ 'on flat_stove_1 plate_1',
+ 'on flat_stove_1 flat_stove_1',
+ 'on flat_stove_1 wooden_cabinet_1',
+ 'on wooden_cabinet_1 akita_black_bowl_1',
+ 'on wooden_cabinet_1 akita_black_bowl_2',
+ 'on wooden_cabinet_1 cookies_1',
+ 'on wooden_cabinet_1 glazed_rim_porcelain_ramekin_1',
+ 'on wooden_cabinet_1 plate_1',
+ 'on wooden_cabinet_1 flat_stove_1',
+ 'on wooden_cabinet_1 wooden_cabinet_1',
+ 'inside akita_black_bowl_1 wooden_cabinet_1_top_region',
+ 'inside akita_black_bowl_1 wooden_cabinet_1_middle_region',
+ 'inside akita_black_bowl_1 wooden_cabinet_1_bottom_region',
+ 'inside akita_black_bowl_2 wooden_cabinet_1_top_region',
+ 'inside akita_black_bowl_2 wooden_cabinet_1_middle_region',
+ 'inside akita_black_bowl_2 wooden_cabinet_1_bottom_region',
+ 'inside cookies_1 wooden_cabinet_1_top_region',
+ 'inside cookies_1 wooden_cabinet_1_middle_region',
+ 'inside cookies_1 wooden_cabinet_1_bottom_region',
+ 'inside glazed_rim_porcelain_ramekin_1 wooden_cabinet_1_top_region',
+ 'inside glazed_rim_porcelain_ramekin_1 wooden_cabinet_1_middle_region',
+ 'inside glazed_rim_porcelain_ramekin_1 wooden_cabinet_1_bottom_region',
+ 'inside plate_1 wooden_cabinet_1_top_region',
+ 'inside plate_1 wooden_cabinet_1_middle_region',
+ 'inside plate_1 wooden_cabinet_1_bottom_region',
+ 'inside flat_stove_1 wooden_cabinet_1_top_region',
+ 'inside flat_stove_1 wooden_cabinet_1_middle_region',
+ 'inside flat_stove_1 wooden_cabinet_1_bottom_region',
+ 'inside wooden_cabinet_1 wooden_cabinet_1_top_region',
+ 'inside wooden_cabinet_1 wooden_cabinet_1_middle_region',
+ 'inside wooden_cabinet_1 wooden_cabinet_1_bottom_region',
+ 'table-center akita_black_bowl_1',
+ 'table-center akita_black_bowl_2',
+ 'table-center cookies_1',
+ 'table-center glazed_rim_porcelain_ramekin_1',
+ 'table-center plate_1',
+ 'table-center flat_stove_1',
+ 'table-center wooden_cabinet_1',
+ 'pick-up-target akita_black_bowl_1',
+ 'pick-up-target akita_black_bowl_2',
+ 'pick-up-target cookies_1',
+ 'pick-up-target glazed_rim_porcelain_ramekin_1',
+ 'pick-up-target plate_1',
+ 'pick-up-target flat_stove_1',
+ 'pick-up-target wooden_cabinet_1'
+]
+
+symbol_to_index = {symbol: idx for idx, symbol in enumerate(ALL_SYMBOLS)}
+num_labels = len(ALL_SYMBOLS)
+
+def dict_to_binary_array(symbolic_state_dict):
+    binary_array = np.zeros(num_labels, dtype=int)
+    for symbol, value in symbolic_state_dict.items():
+        if symbol in symbol_to_index:
+            binary_array[symbol_to_index[symbol]] = value
+        else:
+            print(f"Warning: Symbol '{symbol}' not found in `ALL_SYMBOLS`. Ignoring.")
+    return binary_array
+
 
 
 @dataclass
@@ -70,7 +202,7 @@ class GenerateConfig:
     #################################################################################################################
     task_suite_name: str = "libero_spatial"          # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
-    num_trials_per_task: int = 50                    # Number of rollouts per task
+    num_trials_per_task: int = 1                    # Number of rollouts per task
 
     #################################################################################################################
     # Utils
@@ -154,6 +286,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
         # Initialize LIBERO environment and task description
         env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
+        
+        core_env = env.env  # Unwrap the core environment
 
         # Start episodes
         task_episodes, task_successes = 0, 0
@@ -167,6 +301,15 @@ def eval_libero(cfg: GenerateConfig) -> None:
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
 
+            # # Log initial state predicates
+            # if hasattr(core_env, "parsed_problem"):
+            #     print("Evaluating initial state predicates:")
+            #     for predicate in core_env.parsed_problem.get("initial_state", []):
+            #         result = core_env._eval_predicate(predicate)
+            #         print(f"  Initial State Predicate {predicate}: {result}")
+
+            detector = PickPlaceDetector(env.env, return_int=True)
+            
             # Setup
             t = 0
             replay_images = []
@@ -183,6 +326,11 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             print(f"Starting episode {task_episodes+1}...")
             log_file.write(f"Starting episode {task_episodes+1}...\n")
+            
+            # Containers for the episode
+            episode_embeddings = []
+            episode_symbolic_states = []
+            
             while t < max_steps + cfg.num_steps_wait:
                 try:
                     # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
@@ -207,14 +355,29 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         ),
                     }
 
-                    # Query model to get action
-                    action = get_action(
-                        cfg,
+                    # Query model to get action and collect embeddings
+                    embeddings, action = get_vla_action(
                         model,
+                        processor,
+                        cfg.pretrained_checkpoint,
                         observation,
                         task_description,
-                        processor=processor,
+                        cfg.unnorm_key,
+                        center_crop=cfg.center_crop,
+                        log_dir=None  # Disable per-step logging
                     )
+
+                    # Collect embeddings for this step
+                    if embeddings is not None:
+                        # Save the pooled embedding directly
+                        episode_embeddings.append(embeddings)  # embeddings is already [4096]
+                        # Optional: Check variance
+                        embedding_variance = np.var(embeddings)
+                        print(f"Embedding Variance: {embedding_variance}")
+                    else:
+                        # Handle cases where embeddings might be None
+                        episode_embeddings.append(np.zeros(4096, dtype=np.float32))
+
 
                     # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
                     action = normalize_gripper_action(action, binarize=True)
@@ -226,6 +389,32 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
                     # Execute action in environment
                     obs, reward, done, info = env.step(action.tolist())
+                    
+                    # Detect the symbolic states
+                    symbolic_state = detector.detect_binary_states()
+                    # print("symbolic_state", symbolic_state)
+                    # Convert symbolic_state dict to binary array
+                    binary_label = dict_to_binary_array(symbolic_state)
+                    episode_symbolic_states.append(binary_label)
+
+                    # if hasattr(core_env, "parsed_problem"):
+                    #     print("Parsed problem structure:")
+                    #     for key, value in core_env.parsed_problem.items():
+                    #         print(f"Key: {key}, Type: {type(value)}, Example: {repr(value)[:200]}")
+
+#                     # Log all object states
+#                     if hasattr(core_env, "object_states_dict"):
+#                         print(f"Object states after step {t}:")
+#                         for obj_name, obj_state in core_env.object_states_dict.items():
+#                             print(f"  {obj_name}: {vars(obj_state)}")
+
+#                     # Log goal state predicates
+#                     if hasattr(core_env, "_eval_predicate"):
+#                         print(f"Goal state predicate evaluations after step {t}:")
+#                         for predicate in core_env.parsed_problem.get("goal_state", []):
+#                             result = core_env._eval_predicate(predicate)
+#                             print(f"  Goal Predicate {predicate}: {result}")
+                        
                     if done:
                         task_successes += 1
                         total_successes += 1
@@ -239,6 +428,25 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             task_episodes += 1
             total_episodes += 1
+
+            # Save per-action data for the episode
+            if episode_embeddings and episode_symbolic_states:
+                log_file.write(f"Saving per-action data for episode {total_episodes}...\n")
+                log_file.flush()
+                # Save per-action embeddings and labels
+                if cfg.local_log_dir:
+                    os.makedirs(cfg.local_log_dir, exist_ok=True)
+                    log_file_episode = os.path.join(cfg.local_log_dir, f"episode_{total_episodes}.pt")
+                    torch.save({
+                        "visual_semantic_encoding": torch.FloatTensor(episode_embeddings),  # Shape: (num_actions, 4096)
+                        "symbolic_state": torch.FloatTensor(episode_symbolic_states)       # Shape: (num_actions, 96)
+                    }, log_file_episode)
+                    print(f"Per-action embeddings and labels saved to: {log_file_episode}")
+                    log_file.write(f"Per-action embeddings and labels saved to: {log_file_episode}\n")
+            else:
+                print("Warning: No embeddings or symbolic states collected for this episode.")
+                log_file.write("Warning: No embeddings or symbolic states collected for this episode.\n")
+            
 
             # Save a replay video of the episode
             save_rollout_video(
@@ -268,9 +476,6 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 }
             )
 
-    # Save local log file
-    log_file.close()
-
     # Push total metrics and local log file to wandb
     if cfg.use_wandb:
         wandb.log(
@@ -280,6 +485,9 @@ def eval_libero(cfg: GenerateConfig) -> None:
             }
         )
         wandb.save(local_log_filepath)
+        
+    # Save local log file
+    log_file.close()
 
 
 if __name__ == "__main__":

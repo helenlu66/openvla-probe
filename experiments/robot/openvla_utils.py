@@ -124,7 +124,7 @@ def crop_and_resize(image, crop_scale, batch_size):
     return image
 
 
-def get_vla_action(vla, processor, base_vla_name, obs, task_label, unnorm_key, center_crop=False):
+def get_vla_action(vla, processor, base_vla_name, obs, task_label, unnorm_key, center_crop=False, log_dir="./logs"):
     """Generates an action with the VLA policy."""
     image = Image.fromarray(obs["full_image"])
     image = image.convert("RGB")
@@ -165,6 +165,30 @@ def get_vla_action(vla, processor, base_vla_name, obs, task_label, unnorm_key, c
     # Process inputs.
     inputs = processor(prompt, image).to(DEVICE, dtype=torch.bfloat16)
 
-    # Get action.
-    action = vla.predict_action(**inputs, unnorm_key=unnorm_key, do_sample=False)
-    return action
+    # # Get action.
+    # action = vla.predict_action(**inputs, unnorm_key=unnorm_key, do_sample=False)
+    # return action
+    
+    # Correctly extract the final token embedding with Float32 conversion
+    with torch.no_grad():
+        outputs = vla(**inputs, output_hidden_states=True)
+
+        # Verify the number of hidden layers
+        total_layers = len(outputs.hidden_states)
+        # print(f"Total hidden layers: {total_layers}")
+
+        # Extract the final hidden layer and convert to Float32
+        final_hidden_layer = outputs.hidden_states[-1].to(torch.float32)  # Shape: [batch_size, seq_len, hidden_dim]
+
+        # Extract the embedding of the final token
+        final_token_embedding = final_hidden_layer[:, -1, :]  # Shape: [batch_size, hidden_dim]
+
+        # Optionally, print variance for verification
+        variance = final_token_embedding.var().item()
+        # print(f"Final Token Embedding Variance: {variance}")
+
+        # Predict action
+        action = vla.predict_action(**inputs, unnorm_key=unnorm_key, do_sample=False)
+
+    # Return final token embedding and action
+    return final_token_embedding.squeeze(0).cpu().numpy(), action

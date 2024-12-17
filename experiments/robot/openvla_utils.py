@@ -124,14 +124,22 @@ def crop_and_resize(image, crop_scale, batch_size):
     return image
 
 
-def get_vla_action(vla, processor, base_vla_name, obs, task_label, unnorm_key, center_crop=False, log_dir="./logs"):
-    """Generates an action with the VLA policy."""
+def get_vla_action(
+    vla,
+    processor,
+    base_vla_name,
+    obs,
+    task_label,
+    unnorm_key,
+    center_crop=False,
+    layer_indices=None,  # Accept a list of layer indices
+    log_dir="./logs",
+    pooling_method='final_token'  # New parameter: 'final_token' or 'mean'
+):
+    """Generates actions with the VLA policy and extracts embeddings from specified layers."""
     image = Image.fromarray(obs["full_image"])
     image = image.convert("RGB")
 
-    # (If trained with image augmentations) Center crop image and then resize back up to original size.
-    # IMPORTANT: Let's say crop scale == 0.9. To get the new height and width (post-crop), multiply
-    #            the original height and width by sqrt(0.9) -- not 0.9!
     if center_crop:
         batch_size = 1
         crop_scale = 0.9
@@ -165,30 +173,34 @@ def get_vla_action(vla, processor, base_vla_name, obs, task_label, unnorm_key, c
     # Process inputs.
     inputs = processor(prompt, image).to(DEVICE, dtype=torch.bfloat16)
 
-    # # Get action.
-    # action = vla.predict_action(**inputs, unnorm_key=unnorm_key, do_sample=False)
-    # return action
-    
-    # Correctly extract the final token embedding with Float32 conversion
+    # Set default layer_indices if not provided
+    if layer_indices is None:
+        layer_indices = [-1]
+
+    # Extract embeddings from multiple layers
+    embeddings_dict = {}
     with torch.no_grad():
         outputs = vla(**inputs, output_hidden_states=True)
 
-        # Verify the number of hidden layers
-        total_layers = len(outputs.hidden_states)
-        # print(f"Total hidden layers: {total_layers}")
+        for idx in layer_indices:
+            # Handle negative indices
+            layer_idx = idx if idx >= 0 else len(outputs.hidden_states) + idx
+            if layer_idx < 0 or layer_idx >= len(outputs.hidden_states):
+                raise ValueError(f"Invalid layer index: {idx}")
 
-        # Extract the final hidden layer and convert to Float32
-        final_hidden_layer = outputs.hidden_states[-1].to(torch.float32)  # Shape: [batch_size, seq_len, hidden_dim]
+            layer = outputs.hidden_states[layer_idx].to(torch.float32)  # Shape: [batch_size, seq_len, hidden_dim]
+            
+            if pooling_method == 'final_token':
+                token_embedding = layer[:, -1, :].cpu().numpy()  # Shape: [batch_size, hidden_dim]
+            elif pooling_method == 'mean':
+                token_embedding = layer.mean(dim=1).cpu().numpy()  # Shape: [batch_size, hidden_dim]
+            else:
+                raise ValueError("Invalid pooling method. Choose 'final_token' or 'mean'.")
 
-        # Extract the embedding of the final token
-        final_token_embedding = final_hidden_layer[:, -1, :]  # Shape: [batch_size, hidden_dim]
+            embeddings_dict[idx] = token_embedding.squeeze(0)  # Shape: [hidden_dim]
 
-        # Optionally, print variance for verification
-        variance = final_token_embedding.var().item()
-        # print(f"Final Token Embedding Variance: {variance}")
-
-        # Predict action
+        # Predict action using the model
         action = vla.predict_action(**inputs, unnorm_key=unnorm_key, do_sample=False)
 
-    # Return final token embedding and action
-    return final_token_embedding.squeeze(0).cpu().numpy(), action
+    # Return embeddings dictionary and action
+    return embeddings_dict, action

@@ -1,29 +1,34 @@
+
 """
-run_libero_eval_spatial.py
+run_libero_eval.py
 
 Runs a model in a LIBERO simulation environment.
 
 Usage:
-
-# Launch LIBERO-Spatial evals
-python experiments/robot/libero/run_libero_eval_spatial.py \
-  --model_family openvla \
-  --pretrained_checkpoint openvla/openvla-7b-finetuned-libero-spatial \
-  --task_suite_name libero_spatial \
-  --center_crop True
-
-# OpenVLA:
-# IMPORTANT: Set `center_crop=True` if model was fine-tuned with augmentations
-python experiments/robot/libero/run_libero_eval.py \
-    --model_family openvla \
-    --pretrained_checkpoint <CHECKPOINT_PATH> \
-    --task_suite_name [libero_spatial | libero_object | libero_goal | libero_10 | libero_90] \
-    --center_crop [True | False] \
-    --run_id_note <OPTIONAL TAG TO INSERT INTO RUN ID FOR LOGGING> \
-    --use_wandb [True | False] \
-    --wandb_project <PROJECT> \
-    --wandb_entity <ENTITY>
+    # OpenVLA:
+    # IMPORTANT: Set center_crop=True if model is fine-tuned with augmentations
+    python experiments/robot/libero/run_libero_eval.py \
+        --model_family openvla \
+        --pretrained_checkpoint <CHECKPOINT_PATH> \
+        --task_suite_name [ libero_spatial | libero_object | libero_goal | libero_10 | libero_90 ] \
+        --center_crop [ True | False ] \
+        --run_id_note <OPTIONAL TAG TO INSERT INTO RUN ID FOR LOGGING> \
+        --use_wandb [ True | False ] \
+        --wandb_project <PROJECT> \
+        --wandb_entity <ENTITY>
 """
+
+import os
+os.environ["MUJOCO_GL"] = "egl"
+
+
+# import OpenGL
+# OpenGL.ERROR_CHECKING = False
+
+# import OpenGL.raw.EGL._errors
+# from OpenGL.raw.EGL._errors import _ErrorChecker
+# OpenGL.raw.EGL._errors._error_checker = _ErrorChecker
+
 
 import os
 import sys
@@ -38,26 +43,49 @@ from libero.libero import benchmark
 
 import wandb
 
-import json
-
-import ast
-
 import torch
 
-from detection.libero_spatial_object_relation_detector import LiberoSpatialObjectRelationDetector
-from detection.libero_spatial_action_state_subgoal_detector import LiberoSpatialActionDetector
+from detection.libero_object_object_relation_detector import LiberoObjectObjectRelationDetector as LiberoObjectRelationDetector
+from detection.libero_object_action_state_subgoal_detector import LiberoObjectActionDetector
 
+# ▲ NEW ────────────────────────────────────────────────────────────────────────
+# Which hidden layers to probe. 0 = embedding, 1-32 = Llama blocks.
+DESIRED_LAYER_INDICES = list(range(33))
 
-def serialize_obs(obs):
-    """
-    Convert observations containing NumPy arrays to JSON-serializable format.
-    """
-    if isinstance(obs, dict):
-        return {k: serialize_obs(v) for k, v in obs.items()}
-    elif isinstance(obs, np.ndarray):
-        return obs.tolist()
-    else:
-        return obs
+# Text files that list every symbolic key we may see (-1/0/1 labels)
+OBJREL_KEYS_FILE   = "./experiments/robot/libero/object_object_relations_keys.txt"
+ACTSUB_KEYS_FILE   = "./experiments/robot/libero/object_action_states_keys.txt"
+
+import ast
+with open(OBJREL_KEYS_FILE) as f:
+    ALL_OBJREL_KEYS = ast.literal_eval(f.read().strip())
+with open(ACTSUB_KEYS_FILE) as f:
+    ALL_ACTSUB_KEYS = ast.literal_eval(f.read().strip())
+
+objrel_key2idx = {k: i for i, k in enumerate(ALL_OBJREL_KEYS)}
+actsub_key2idx = {k: i for i, k in enumerate(ALL_ACTSUB_KEYS)}
+NUM_OBJREL = len(ALL_OBJREL_KEYS)
+NUM_ACTSUB = len(ALL_ACTSUB_KEYS)
+
+# INSIDE_KEY  = "inside alphabet_soup_1 basket_1_contain_region"
+# INSIDE_IDX  = objrel_key2idx[INSIDE_KEY]
+
+EXTRA_STEPS_AFTER_SUCCESS = int(300)
+
+def objrel_dict_to_vec(d):
+    v = np.full(NUM_OBJREL, -1, dtype=np.int8)   # default “not present”
+    for k, val in d.items():
+        if k in objrel_key2idx:
+            v[objrel_key2idx[k]] = val
+    return v
+
+def actsub_dict_to_vec(d):
+    v = np.full(NUM_ACTSUB, -1, dtype=np.int8)
+    for k, val in d.items():
+        if k in actsub_key2idx:
+            v[actsub_key2idx[k]] = val
+    return v
+# ───────────────────────────────────────────────────────────────────────────────
 
 
 # Append current directory so that interpreter can find experiments.robot
@@ -69,7 +97,7 @@ from experiments.robot.libero.libero_utils import (
     quat2axisangle,
     save_rollout_video,
 )
-from experiments.robot.openvla_utils import get_processor, get_vla_action
+from experiments.robot.openvla_utils import get_processor
 from experiments.robot.robot_utils import (
     DATE_TIME,
     get_action,
@@ -79,50 +107,6 @@ from experiments.robot.robot_utils import (
     normalize_gripper_action,
     set_seed_everywhere,
 )
-
-
-DESIRED_LAYER_INDICES = [0, 8, 16, 24, 32]  # Probing multiple layers
-
-# Define the paths to the symbolic state key files
-object_relations_file = "./experiments/robot/libero/spatial_object_relations_keys.txt"
-action_subgoals_file = "./experiments/robot/libero/spatial_action_states_keys.txt"
-
-# Read and parse object relations symbols
-with open(object_relations_file, "r") as file:
-    object_relations_content = file.read().strip()
-ALL_OBJECT_RELATIONS_SYMBOLS = ast.literal_eval(object_relations_content)
-
-# Read and parse action subgoals symbols
-with open(action_subgoals_file, "r") as file:
-    action_subgoals_content = file.read().strip()
-ALL_ACTION_SUBGOALS_SYMBOLS = ast.literal_eval(action_subgoals_content)
-
-# Create separate symbol-to-index mappings
-object_relations_symbol_to_index = {symbol: idx for idx, symbol in enumerate(ALL_OBJECT_RELATIONS_SYMBOLS)}
-num_object_relations_labels = len(ALL_OBJECT_RELATIONS_SYMBOLS)
-
-action_subgoals_symbol_to_index = {symbol: idx for idx, symbol in enumerate(ALL_ACTION_SUBGOALS_SYMBOLS)}
-num_action_subgoals_labels = len(ALL_ACTION_SUBGOALS_SYMBOLS)
-
-
-def dict_to_binary_array_object_relations(symbolic_state_dict):
-    binary_array = np.zeros(num_object_relations_labels, dtype=int)
-    for symbol, value in symbolic_state_dict.items():
-        if symbol in object_relations_symbol_to_index:
-            binary_array[object_relations_symbol_to_index[symbol]] = value
-        else:
-            print(f"Warning: Symbol '{symbol}' not found in `ALL_OBJECT_RELATIONS_SYMBOLS`. Ignoring.")
-    return binary_array
-
-
-def dict_to_binary_array_action_subgoals(symbolic_state_dict):
-    binary_array = np.zeros(num_action_subgoals_labels, dtype=int)
-    for symbol, value in symbolic_state_dict.items():
-        if symbol in action_subgoals_symbol_to_index:
-            binary_array[action_subgoals_symbol_to_index[symbol]] = value
-        else:
-            print(f"Warning: Symbol '{symbol}' not found in `ALL_ACTION_SUBGOALS_SYMBOLS`. Ignoring.")
-    return binary_array
 
 
 @dataclass
@@ -136,14 +120,15 @@ class GenerateConfig:
     pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
     load_in_8bit: bool = False                       # (For OpenVLA only) Load with 8-bit quantization
     load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
+
     center_crop: bool = True                         # Center crop? (if trained w/ random crop image aug)
 
     #################################################################################################################
     # LIBERO environment-specific parameters
     #################################################################################################################
-    task_suite_name: str = "libero_10"                # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
-    num_steps_wait: int = 10                          # Number of steps to wait for objects to stabilize in sim
-    num_trials_per_task: int = 6                      # Number of rollouts per task
+    task_suite_name: str = "libero_object"          # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+    num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
+    num_trials_per_task: int = 6                    # Number of rollouts per task
 
     #################################################################################################################
     # Utils
@@ -164,7 +149,7 @@ class GenerateConfig:
 def eval_libero(cfg: GenerateConfig) -> None:
     assert cfg.pretrained_checkpoint is not None, "cfg.pretrained_checkpoint must not be None!"
     if "image_aug" in cfg.pretrained_checkpoint:
-        assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
+        assert cfg.center_crop, "Expecting center_crop==True because model was trained with image augmentations!"
     assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
 
     # Set random seed
@@ -182,7 +167,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
         # with the suffix "_no_noops" in the dataset name)
         if cfg.unnorm_key not in model.norm_stats and f"{cfg.unnorm_key}_no_noops" in model.norm_stats:
             cfg.unnorm_key = f"{cfg.unnorm_key}_no_noops"
-        assert cfg.unnorm_key in model.norm_stats, f"Action un-norm key {cfg.unnorm_key} not found in VLA `norm_stats`!"
+        assert cfg.unnorm_key in model.norm_stats, f"Action un-norm key {cfg.unnorm_key} not found in VLA norm_stats!"
 
     # [OpenVLA] Get Hugging Face processor
     processor = None
@@ -227,12 +212,12 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
         # Initialize LIBERO environment and task description
         env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
-        
-        core_env = env.env  # Unwrap the core environment
-        
-        # Initialize both detectors
-        object_relations_detector = LiberoSpatialObjectRelationDetector(core_env, return_int=True)
-        action_detector = LiberoSpatialActionDetector(core_env, return_int=True)
+
+        core_env = env.env  # Unwrap
+
+        # Create detectors for object relations & action subgoals
+        obj_rel_detector  = LiberoObjectRelationDetector(core_env, return_int=True)
+        action_det_detector = LiberoObjectActionDetector(core_env, return_int=True)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
@@ -249,6 +234,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             # Setup
             t = 0
             replay_images = []
+            done = False          # ← NEW: ensures done is always defined
             if cfg.task_suite_name == "libero_spatial":
                 max_steps = 220  # longest training demo has 193 steps
             elif cfg.task_suite_name == "libero_object":
@@ -262,12 +248,15 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             print(f"Starting episode {task_episodes+1}...")
             log_file.write(f"Starting episode {task_episodes+1}...\n")
-            
-            # Containers for the episode
-            episode_embeddings = {layer_idx: [] for layer_idx in DESIRED_LAYER_INDICES}
-            episode_symbolic_states_object_relations = []
-            episode_symbolic_states_action_subgoals = []
-            
+
+            # ▲ NEW (inside episode-for-loop, before while)
+            episode_embeds = {L: [] for L in DESIRED_LAYER_INDICES}
+            episode_objrel = []
+            episode_actsub = []
+
+            success_reached      = False
+            steps_after_success  = 0
+
             while t < max_steps + cfg.num_steps_wait:
                 try:
                     # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
@@ -292,23 +281,36 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         ),
                     }
 
-                    # Query model to get actions and collect embeddings
-                    embeddings_dict, action = get_vla_action(
-                        model,
-                        processor,
-                        cfg.pretrained_checkpoint,
-                        observation,
-                        task_description,
-                        cfg.unnorm_key,
-                        center_crop=cfg.center_crop,
-                        layer_indices=DESIRED_LAYER_INDICES,  # Pass the list of layers
-                        log_dir=None,  # Disable per-step logging
-                        pooling_method='final_token'  # You can switch to 'mean' if desired
+                    # ▲ NEW -----------------------------------------------------------------------
+                    embeds, action = get_action(
+                        cfg, model, observation, task_description,
+                        processor=processor,
+                        return_embeddings=True,
+                        layer_indices=DESIRED_LAYER_INDICES,
                     )
+                    assert set(embeds) == set(DESIRED_LAYER_INDICES), "missing layer in embeds"  # ← NEW
+                    # Detect symbolic states **at the SAME time-step**
+                    objrel_vec = objrel_dict_to_vec(obj_rel_detector.detect_binary_states())
+                    
+                    # inside_val = objrel_vec[INSIDE_IDX]               # –1 / 0 / 1
+                    # print(f"[t={t}] {INSIDE_KEY} = {inside_val}")
+                    # log_file.write(f"[t={t}] {INSIDE_KEY} = {inside_val}\n")
+                    
+                    assert objrel_vec.shape[0] == NUM_OBJREL
+                    assert set(np.unique(objrel_vec)).issubset({-1, 0, 1})
+                    actsub_vec = actsub_dict_to_vec(action_det_detector.detect_binary_states())
+                    assert actsub_vec.shape[0] == NUM_ACTSUB
+                    assert set(np.unique(actsub_vec)).issubset({-1, 0, 1})
 
-                    # Collect embeddings before action execution
-                    for layer_idx, embedding in embeddings_dict.items():
-                        episode_embeddings[layer_idx].append(embedding)
+                    
+
+                    # Append to episode buffers
+                    for L, e in embeds.items():
+                        episode_embeds[L].append(e)
+                    episode_objrel.append(objrel_vec)
+                    episode_actsub.append(actsub_vec)
+                    # ----------------------------------------------------------------------------- 
+
 
                     # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
                     action = normalize_gripper_action(action, binarize=True)
@@ -319,24 +321,22 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         action = invert_gripper_action(action)
 
                     # Execute action in environment
-                    obs, reward, done, info = env.step(action.tolist())
-                    
-                    # Detect symbolic states from both detectors
-                    object_relations = object_relations_detector.detect_binary_states()
-                    action_subgoals = action_detector.detect_binary_states()
-                    
-                    # Convert to binary arrays separately
-                    binary_label_object_relations = dict_to_binary_array_object_relations(object_relations)
-                    binary_label_action_subgoals = dict_to_binary_array_action_subgoals(action_subgoals)
-                    
-                    # Append to respective lists
-                    episode_symbolic_states_object_relations.append(binary_label_object_relations)
-                    episode_symbolic_states_action_subgoals.append(binary_label_action_subgoals)
 
-                    if done:
-                        task_successes += 1
-                        total_successes += 1
-                        break
+                    action_to_send = action.tolist()          # always use the policy’s action
+
+                    obs, reward, done, info = env.step(action_to_send)
+
+                    if done and not success_reached:          # first time we see done=True
+                        success_reached   = True
+                        steps_after_success = 0
+                        task_successes   += 1      # ← NEW
+                        total_successes  += 1      # ← NEW
+                    
+                    if success_reached:
+                        steps_after_success += 1
+                        if steps_after_success >= EXTRA_STEPS_AFTER_SUCCESS:
+                            break        # leave the while-loop after 3 s of extra frames
+       
                     t += 1
 
                 except Exception as e:
@@ -347,29 +347,23 @@ def eval_libero(cfg: GenerateConfig) -> None:
             task_episodes += 1
             total_episodes += 1
 
-            # Save per-action data for the episode
-            if episode_embeddings and episode_symbolic_states_object_relations and episode_symbolic_states_action_subgoals:
-                log_file.write(f"Saving per-action data for episode {total_episodes}...\n")
-                log_file.flush()
-                # Save per-action embeddings and labels
-                if cfg.local_log_dir:
-                    os.makedirs(cfg.local_log_dir, exist_ok=True)
-                    log_file_episode = os.path.join(cfg.local_log_dir, f"episode_{total_episodes}.pt")
-                    torch.save({
-                        "visual_semantic_encoding": episode_embeddings,  # Dict[layer_idx, list of embeddings]
-                        "symbolic_state_object_relations": torch.FloatTensor(np.array(episode_symbolic_states_object_relations)),  # Shape: (num_actions, num_object_relations_labels)
-                        "symbolic_state_action_subgoals": torch.FloatTensor(np.array(episode_symbolic_states_action_subgoals))     # Shape: (num_actions, num_action_subgoals_labels)
-                    }, log_file_episode)
-                    print(f"Per-action embeddings and labels saved to: {log_file_episode}")
-                    log_file.write(f"Per-action embeddings and labels saved to: {log_file_episode}\n")
-            else:
-                print("Warning: No embeddings or symbolic states collected for this episode.")
-                log_file.write("Warning: No embeddings or symbolic states collected for this episode.\n")
-
             # Save a replay video of the episode
             save_rollout_video(
                 replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
             )
+
+            # ▲ NEW ────────────────────────────────────────────────────────────────────────
+            if any(len(v) for v in episode_embeds.values()):
+                save_dict = {
+                    "visual_semantic_encoding": {L: torch.tensor(v) for L, v in episode_embeds.items()},
+                    "symbolic_state_object_relations": torch.tensor(np.array(episode_objrel)),
+                    "symbolic_state_action_subgoals":   torch.tensor(np.array(episode_actsub)),
+                }
+                os.makedirs(cfg.local_log_dir, exist_ok=True)
+                save_fp = os.path.join(cfg.local_log_dir, f"episode_{total_episodes}.pt")
+                torch.save(save_dict, save_fp)
+                log_file.write(f"Per-action embeddings & states saved to {save_fp}\n")
+            # ───────────────────────────────────────────────────────────────────────────────
 
             # Log current results
             print(f"Success: {done}")
@@ -394,6 +388,9 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 }
             )
 
+    # Save local log file
+    log_file.close()
+
     # Push total metrics and local log file to wandb
     if cfg.use_wandb:
         wandb.log(
@@ -403,9 +400,6 @@ def eval_libero(cfg: GenerateConfig) -> None:
             }
         )
         wandb.save(local_log_filepath)
-        
-    # Save local log file
-    log_file.close()
 
 
 if __name__ == "__main__":

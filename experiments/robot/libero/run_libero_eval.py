@@ -1,401 +1,403 @@
-# """
-# run_libero_eval.py
 
-# Runs a model in a LIBERO simulation environment.
+"""
+run_libero_eval.py
 
-# Usage:
-#     # OpenVLA:
-#     # IMPORTANT: Set `center_crop=True` if model is fine-tuned with augmentations
-#     python experiments/robot/libero/run_libero_eval.py \
-#         --model_family openvla \
-#         --pretrained_checkpoint <CHECKPOINT_PATH> \
-#         --task_suite_name [ libero_spatial | libero_object | libero_goal | libero_10 | libero_90 ] \
-#         --center_crop [ True | False ] \
-#         --layer_idx <LAYER_INDEX> \
-#         --run_id_note <OPTIONAL TAG TO INSERT INTO RUN ID FOR LOGGING> \
-#         --use_wandb [ True | False ] \
-#         --wandb_project <PROJECT> \
-#         --wandb_entity <ENTITY> \
-# """
+Runs a model in a LIBERO simulation environment.
 
-# import os
-# import sys
-# from dataclasses import dataclass
-# from pathlib import Path
-# from typing import Optional, Union
-
-# import draccus
-# import numpy as np
-# import tqdm
-# from libero.libero import benchmark
-
-# import wandb
-
-# import json
-
-# import torch
-
-# from detection.libero_spatial_object_relation_detector import LiberoSpatialObjectRelationDetector
-# from detection.libero_spatial_action_state_subgoal_detector import LiberoSpatialActionDetector
-
-# def serialize_obs(obs):
-#     """
-#     Convert observations containing NumPy arrays to JSON-serializable format.
-#     """
-#     if isinstance(obs, dict):
-#         return {k: serialize_obs(v) for k, v in obs.items()}
-#     elif isinstance(obs, np.ndarray):
-#         return obs.tolist()
-#     else:
-#         return obs
+Usage:
+    # OpenVLA:
+    # IMPORTANT: Set center_crop=True if model is fine-tuned with augmentations
+    python experiments/robot/libero/run_libero_eval.py \
+        --model_family openvla \
+        --pretrained_checkpoint <CHECKPOINT_PATH> \
+        --task_suite_name [ libero_spatial | libero_object | libero_goal | libero_10 | libero_90 ] \
+        --center_crop [ True | False ] \
+        --run_id_note <OPTIONAL TAG TO INSERT INTO RUN ID FOR LOGGING> \
+        --use_wandb [ True | False ] \
+        --wandb_project <PROJECT> \
+        --wandb_entity <ENTITY>
+"""
 
 
-# # Append current directory so that interpreter can find experiments.robot
-# sys.path.append("../..")
-# from experiments.robot.libero.libero_utils import (
-#     get_libero_dummy_action,
-#     get_libero_env,
-#     get_libero_image,
-#     quat2axisangle,
-#     save_rollout_video,
-# )
-# from experiments.robot.openvla_utils import get_processor, get_vla_action
-# from experiments.robot.robot_utils import (
-#     DATE_TIME,
-#     get_action,
-#     get_image_resize_size,
-#     get_model,
-#     invert_gripper_action,
-#     normalize_gripper_action,
-#     set_seed_everywhere,
-# )
+import OpenGL
+OpenGL.ERROR_CHECKING = False
+
+import OpenGL.raw.EGL._errors
+from OpenGL.raw.EGL._errors import _ErrorChecker
+OpenGL.raw.EGL._errors._error_checker = _ErrorChecker
 
 
-# DESIRED_LAYER_INDICES = list(range(0, 33, 5))  # [0, 5, 10, 15, 20, 25, 30]
+import os
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Union
 
-# # Define the path to the text file
-# file_path = "libero10_action_states_keys.txt"
+import draccus
+import numpy as np
+import tqdm
+from libero.libero import benchmark
 
-# # Read the content of the file
-# with open(file_path, "r") as file:
-#     content = file.read().strip()  # Read the file and remove leading/trailing whitespace
+import wandb
 
-# # Parse the content as a Python list
-# import ast  # For safely parsing Python literals
-# ALL_SYMBOLS = ast.literal_eval(content)
+import torch
 
-# symbol_to_index = {symbol: idx for idx, symbol in enumerate(ALL_SYMBOLS)}
-# num_labels = len(ALL_SYMBOLS)
+from detection.libero_object_object_relation_detector import LiberoObjectObjectRelationDetector as LiberoObjectRelationDetector
+from detection.libero_object_action_state_subgoal_detector import LiberoObjectActionDetector
 
-# def dict_to_binary_array(symbolic_state_dict):
-#     binary_array = np.zeros(num_labels, dtype=int)
-#     for symbol, value in symbolic_state_dict.items():
-#         if symbol in symbol_to_index:
-#             binary_array[symbol_to_index[symbol]] = value
-#         else:
-#             print(f"Warning: Symbol '{symbol}' not found in `ALL_SYMBOLS`. Ignoring.")
-#     return binary_array
+# ▲ NEW ────────────────────────────────────────────────────────────────────────
+# Which hidden layers to probe. 0 = embedding, 1-32 = Llama blocks.
+DESIRED_LAYER_INDICES = list(range(33))
 
-# @dataclass
-# class GenerateConfig:
-#     # fmt: off
+# Text files that list every symbolic key we may see (0/1 labels)
+OBJREL_KEYS_FILE   = "./experiments/robot/libero/spatial_object_relations_keys.txt"
+ACTSUB_KEYS_FILE   = "./experiments/robot/libero/spatial_action_states_keys.txt"
 
-#     #################################################################################################################
-#     # Model-specific parameters
-#     #################################################################################################################
-#     model_family: str = "openvla"                    # Model family
-#     pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
-#     load_in_8bit: bool = False                       # (For OpenVLA only) Load with 8-bit quantization
-#     load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
-#     # layer_idx: int = -1                              # Layer index to extract embeddings from
-#     center_crop: bool = True                         # Center crop? (if trained w/ random crop image aug)
+import ast
+with open(OBJREL_KEYS_FILE) as f:
+    ALL_OBJREL_KEYS = ast.literal_eval(f.read().strip())
+with open(ACTSUB_KEYS_FILE) as f:
+    ALL_ACTSUB_KEYS = ast.literal_eval(f.read().strip())
 
-#     #################################################################################################################
-#     # LIBERO environment-specific parameters
-#     #################################################################################################################
-#     task_suite_name: str = "libero_spatial"          # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
-#     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
-#     num_trials_per_task: int = 1                    # Number of rollouts per task
+objrel_key2idx = {k: i for i, k in enumerate(ALL_OBJREL_KEYS)}
+actsub_key2idx = {k: i for i, k in enumerate(ALL_ACTSUB_KEYS)}
+NUM_OBJREL = len(ALL_OBJREL_KEYS)
+NUM_ACTSUB = len(ALL_ACTSUB_KEYS)
 
-#     #################################################################################################################
-#     # Utils
-#     #################################################################################################################
-#     run_id_note: Optional[str] = None                # Extra note to add in run ID for logging
-#     local_log_dir: str = "./experiments/logs"        # Local directory for eval logs
+# INSIDE_KEY  = "inside alphabet_soup_1 basket_1_contain_region"
+# INSIDE_IDX  = objrel_key2idx[INSIDE_KEY]
 
-#     use_wandb: bool = False                          # Whether to also log results in Weights & Biases
-#     wandb_project: str = "YOUR_WANDB_PROJECT"        # Name of W&B project to log to (use default!)
-#     wandb_entity: str = "YOUR_WANDB_ENTITY"          # Name of entity to log under
+EXTRA_STEPS_AFTER_SUCCESS = int(300)
 
-#     seed: int = 7                                    # Random Seed (for reproducibility)
+def objrel_dict_to_vec(d):
+    v = np.full(NUM_OBJREL, -1, dtype=np.int8)   # default “not present”
+    for k, val in d.items():
+        if k in objrel_key2idx:
+            v[objrel_key2idx[k]] = val
+    return v
 
-#     # fmt: on
+def actsub_dict_to_vec(d):
+    v = np.full(NUM_ACTSUB, -1, dtype=np.int8)
+    for k, val in d.items():
+        if k in actsub_key2idx:
+            v[actsub_key2idx[k]] = val
+    return v
+# ───────────────────────────────────────────────────────────────────────────────
 
 
-# @draccus.wrap()
-# def eval_libero(cfg: GenerateConfig) -> None:
-#     assert cfg.pretrained_checkpoint is not None, "cfg.pretrained_checkpoint must not be None!"
-#     if "image_aug" in cfg.pretrained_checkpoint:
-#         assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
-#     assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
+# Append current directory so that interpreter can find experiments.robot
+sys.path.append("../..")
+from experiments.robot.libero.libero_utils import (
+    get_libero_dummy_action,
+    get_libero_env,
+    get_libero_image,
+    quat2axisangle,
+    save_rollout_video,
+)
+from experiments.robot.openvla_utils import get_processor
+from experiments.robot.robot_utils import (
+    DATE_TIME,
+    get_action,
+    get_image_resize_size,
+    get_model,
+    invert_gripper_action,
+    normalize_gripper_action,
+    set_seed_everywhere,
+)
 
-#     # Set random seed
-#     set_seed_everywhere(cfg.seed)
 
-#     # [OpenVLA] Set action un-normalization key
-#     cfg.unnorm_key = cfg.task_suite_name
+@dataclass
+class GenerateConfig:
+    # fmt: off
 
-#     # Load model
-#     model = get_model(cfg)
+    #################################################################################################################
+    # Model-specific parameters
+    #################################################################################################################
+    model_family: str = "openvla"                    # Model family
+    pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
+    load_in_8bit: bool = False                       # (For OpenVLA only) Load with 8-bit quantization
+    load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
 
-#     # [OpenVLA] Check that the model contains the action un-normalization key
-#     if cfg.model_family == "openvla":
-#         # In some cases, the key must be manually modified (e.g. after training on a modified version of the dataset
-#         # with the suffix "_no_noops" in the dataset name)
-#         if cfg.unnorm_key not in model.norm_stats and f"{cfg.unnorm_key}_no_noops" in model.norm_stats:
-#             cfg.unnorm_key = f"{cfg.unnorm_key}_no_noops"
-#         assert cfg.unnorm_key in model.norm_stats, f"Action un-norm key {cfg.unnorm_key} not found in VLA `norm_stats`!"
+    center_crop: bool = True                         # Center crop? (if trained w/ random crop image aug)
 
-#     # [OpenVLA] Get Hugging Face processor
-#     processor = None
-#     if cfg.model_family == "openvla":
-#         processor = get_processor(cfg)
+    #################################################################################################################
+    # LIBERO environment-specific parameters
+    #################################################################################################################
+    task_suite_name: str = "libero_spatial"          # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+    num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
+    num_trials_per_task: int = 6                    # Number of rollouts per task
 
-#     # Initialize local logging
-#     run_id = f"EVAL-{cfg.task_suite_name}-{cfg.model_family}-{DATE_TIME}"
-#     if cfg.run_id_note is not None:
-#         run_id += f"--{cfg.run_id_note}"
-#     os.makedirs(cfg.local_log_dir, exist_ok=True)
-#     local_log_filepath = os.path.join(cfg.local_log_dir, run_id + ".txt")
-#     log_file = open(local_log_filepath, "w")
-#     print(f"Logging to local log file: {local_log_filepath}")
+    #################################################################################################################
+    # Utils
+    #################################################################################################################
+    run_id_note: Optional[str] = None                # Extra note to add in run ID for logging
+    local_log_dir: str = "./experiments/logs"        # Local directory for eval logs
 
-#     # Initialize Weights & Biases logging as well
-#     if cfg.use_wandb:
-#         wandb.init(
-#             entity=cfg.wandb_entity,
-#             project=cfg.wandb_project,
-#             name=run_id,
-#         )
+    use_wandb: bool = False                          # Whether to also log results in Weights & Biases
+    wandb_project: str = "YOUR_WANDB_PROJECT"        # Name of W&B project to log to (use default!)
+    wandb_entity: str = "YOUR_WANDB_ENTITY"          # Name of entity to log under
 
-#     # Initialize LIBERO task suite
-#     benchmark_dict = benchmark.get_benchmark_dict()
-#     task_suite = benchmark_dict[cfg.task_suite_name]()
-#     num_tasks_in_suite = task_suite.n_tasks
-#     print(f"Task suite: {cfg.task_suite_name}")
-#     log_file.write(f"Task suite: {cfg.task_suite_name}\n")
+    seed: int = 7                                    # Random Seed (for reproducibility)
 
-#     # Get expected image dimensions
-#     resize_size = get_image_resize_size(cfg)
+    # fmt: on
 
-#     # Start evaluation
-#     total_episodes, total_successes = 0, 0
-#     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
-#         # Get task
-#         task = task_suite.get_task(task_id)
 
-#         # Get default LIBERO initial states
-#         initial_states = task_suite.get_task_init_states(task_id)
+@draccus.wrap()
+def eval_libero(cfg: GenerateConfig) -> None:
+    assert cfg.pretrained_checkpoint is not None, "cfg.pretrained_checkpoint must not be None!"
+    if "image_aug" in cfg.pretrained_checkpoint:
+        assert cfg.center_crop, "Expecting center_crop==True because model was trained with image augmentations!"
+    assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
 
-#         # Initialize LIBERO environment and task description
-#         env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
-        
-#         core_env = env.env  # Unwrap the core environment
-        
-#         object_relations_detector = LiberoSpatialObjectRelationDetector(core_env, return_int=True)
-#         action_detector = LiberoSpatialActionDetector(core_env, return_int=True)
+    # Set random seed
+    set_seed_everywhere(cfg.seed)
 
-#         # Start episodes
-#         task_episodes, task_successes = 0, 0
-#         for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
-#             print(f"\nTask: {task_description}")
-#             log_file.write(f"\nTask: {task_description}\n")
+    # [OpenVLA] Set action un-normalization key
+    cfg.unnorm_key = cfg.task_suite_name
 
-#             # Reset environment
-#             env.reset()
+    # Load model
+    model = get_model(cfg)
 
-#             # Set initial states
-#             obs = env.set_init_state(initial_states[episode_idx])
+    # [OpenVLA] Check that the model contains the action un-normalization key
+    if cfg.model_family == "openvla":
+        # In some cases, the key must be manually modified (e.g. after training on a modified version of the dataset
+        # with the suffix "_no_noops" in the dataset name)
+        if cfg.unnorm_key not in model.norm_stats and f"{cfg.unnorm_key}_no_noops" in model.norm_stats:
+            cfg.unnorm_key = f"{cfg.unnorm_key}_no_noops"
+        assert cfg.unnorm_key in model.norm_stats, f"Action un-norm key {cfg.unnorm_key} not found in VLA norm_stats!"
 
-#             # # Log initial state predicates
-#             # if hasattr(core_env, "parsed_problem"):
-#             #     print("Evaluating initial state predicates:")
-#             #     for predicate in core_env.parsed_problem.get("initial_state", []):
-#             #         result = core_env._eval_predicate(predicate)
-#             #         print(f"  Initial State Predicate {predicate}: {result}")
+    # [OpenVLA] Get Hugging Face processor
+    processor = None
+    if cfg.model_family == "openvla":
+        processor = get_processor(cfg)
 
-#             # Setup
-#             t = 0
-#             replay_images = []
-#             if cfg.task_suite_name == "libero_spatial":
-#                 max_steps = 220  # longest training demo has 193 steps
-#             elif cfg.task_suite_name == "libero_object":
-#                 max_steps = 280  # longest training demo has 254 steps
-#             elif cfg.task_suite_name == "libero_goal":
-#                 max_steps = 300  # longest training demo has 270 steps
-#             elif cfg.task_suite_name == "libero_10":
-#                 max_steps = 520  # longest training demo has 505 steps
-#             elif cfg.task_suite_name == "libero_90":
-#                 max_steps = 400  # longest training demo has 373 steps
+    # Initialize local logging
+    run_id = f"EVAL-{cfg.task_suite_name}-{cfg.model_family}-{DATE_TIME}"
+    if cfg.run_id_note is not None:
+        run_id += f"--{cfg.run_id_note}"
+    os.makedirs(cfg.local_log_dir, exist_ok=True)
+    local_log_filepath = os.path.join(cfg.local_log_dir, run_id + ".txt")
+    log_file = open(local_log_filepath, "w")
+    print(f"Logging to local log file: {local_log_filepath}")
 
-#             print(f"Starting episode {task_episodes+1}...")
-#             log_file.write(f"Starting episode {task_episodes+1}...\n")
-            
-#             # Containers for the episode
-#             episode_embeddings = {layer_idx: [] for layer_idx in DESIRED_LAYER_INDICES}
-#             episode_symbolic_states = []
-            
-#             while t < max_steps + cfg.num_steps_wait:
-#                 try:
-#                     # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
-#                     # and we need to wait for them to fall
-#                     if t < cfg.num_steps_wait:
-#                         obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
-#                         t += 1
-#                         continue
+    # Initialize Weights & Biases logging as well
+    if cfg.use_wandb:
+        wandb.init(
+            entity=cfg.wandb_entity,
+            project=cfg.wandb_project,
+            name=run_id,
+        )
 
-#                     # Get preprocessed image
-#                     img = get_libero_image(obs, resize_size)
+    # Initialize LIBERO task suite
+    benchmark_dict = benchmark.get_benchmark_dict()
+    task_suite = benchmark_dict[cfg.task_suite_name]()
+    num_tasks_in_suite = task_suite.n_tasks
+    print(f"Task suite: {cfg.task_suite_name}")
+    log_file.write(f"Task suite: {cfg.task_suite_name}\n")
 
-#                     # Save preprocessed image for replay video
-#                     replay_images.append(img)
+    # Get expected image dimensions
+    resize_size = get_image_resize_size(cfg)
 
-#                     # Prepare observations dict
-#                     # Note: OpenVLA does not take proprio state as input
-#                     observation = {
-#                         "full_image": img,
-#                         "state": np.concatenate(
-#                             (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
-#                         ),
-#                     }
+    # Start evaluation
+    total_episodes, total_successes = 0, 0
+    for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
+        # Get task
+        task = task_suite.get_task(task_id)
 
-#                     # Query model to get actions and collect embeddings
-#                     embeddings_dict, action = get_vla_action(
-#                         model,
-#                         processor,
-#                         cfg.pretrained_checkpoint,
-#                         observation,
-#                         task_description,
-#                         cfg.unnorm_key,
-#                         center_crop=cfg.center_crop,
-#                         layer_indices=DESIRED_LAYER_INDICES,  # Pass the list of layers
-#                         log_dir=None  # Disable per-step logging
-#                     )
+        # Get default LIBERO initial states
+        initial_states = task_suite.get_task_init_states(task_id)
 
-#                     # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
-#                     action = normalize_gripper_action(action, binarize=True)
+        # Initialize LIBERO environment and task description
+        env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
 
-#                     # [OpenVLA] The dataloader flips the sign of the gripper action to align with other datasets
-#                     # (0 = close, 1 = open), so flip it back (-1 = open, +1 = close) before executing the action
-#                     if cfg.model_family == "openvla":
-#                         action = invert_gripper_action(action)
+        core_env = env.env  # Unwrap
 
-#                     # Execute action in environment
-#                     obs, reward, done, info = env.step(action.tolist())
+        # Create detectors for object relations & action subgoals
+        obj_rel_detector  = LiberoObjectRelationDetector(core_env, return_int=True)
+        action_det_detector = LiberoObjectActionDetector(core_env, return_int=True)
+
+        # Start episodes
+        task_episodes, task_successes = 0, 0
+        for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
+            print(f"\nTask: {task_description}")
+            log_file.write(f"\nTask: {task_description}\n")
+
+            # Reset environment
+            env.reset()
+
+            # Set initial states
+            obs = env.set_init_state(initial_states[episode_idx])
+
+            # Setup
+            t = 0
+            replay_images = []
+            done = False          # ← NEW: ensures done is always defined
+            if cfg.task_suite_name == "libero_spatial":
+                max_steps = 220  # longest training demo has 193 steps
+            elif cfg.task_suite_name == "libero_object":
+                max_steps = 280  # longest training demo has 254 steps
+            elif cfg.task_suite_name == "libero_goal":
+                max_steps = 300  # longest training demo has 270 steps
+            elif cfg.task_suite_name == "libero_10":
+                max_steps = 520  # longest training demo has 505 steps
+            elif cfg.task_suite_name == "libero_90":
+                max_steps = 400  # longest training demo has 373 steps
+
+            print(f"Starting episode {task_episodes+1}...")
+            log_file.write(f"Starting episode {task_episodes+1}...\n")
+
+            # ▲ NEW (inside episode-for-loop, before while)
+            episode_embeds = {L: [] for L in DESIRED_LAYER_INDICES}
+            episode_objrel = []
+            episode_actsub = []
+
+            success_reached      = False
+            steps_after_success  = 0
+
+            while t < max_steps + cfg.num_steps_wait:
+                try:
+                    # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
+                    # and we need to wait for them to fall
+                    if t < cfg.num_steps_wait:
+                        obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
+                        t += 1
+                        continue
+
+                    # Get preprocessed image
+                    img = get_libero_image(obs, resize_size)
+
+                    # Save preprocessed image for replay video
+                    replay_images.append(img)
+
+                    # Prepare observations dict
+                    # Note: OpenVLA does not take proprio state as input
+                    observation = {
+                        "full_image": img,
+                        "state": np.concatenate(
+                            (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
+                        ),
+                    }
+
+                    # ▲ NEW -----------------------------------------------------------------------
+                    embeds, action = get_action(
+                        cfg, model, observation, task_description,
+                        processor=processor,
+                        return_embeddings=True,
+                        layer_indices=DESIRED_LAYER_INDICES,
+                    )
+                    assert set(embeds) == set(DESIRED_LAYER_INDICES), "missing layer in embeds"  # ← NEW
+                    # Detect symbolic states **at the SAME time-step**
+                    objrel_vec = objrel_dict_to_vec(obj_rel_detector.detect_binary_states())
                     
-#                     # Collect embeddings for each specified layer
-#                     for layer_idx, embedding in embeddings_dict.items():
-#                         episode_embeddings[layer_idx].append(embedding)
-                        
-#                     # Detect the symbolic states from both detectors
-#                     object_relations = object_relations_detector.detect_binary_states()
-#                     action_states = action_detector.detect_binary_states()
+                    # inside_val = objrel_vec[INSIDE_IDX]               # –1 / 0 / 1
+                    # print(f"[t={t}] {INSIDE_KEY} = {inside_val}")
+                    # log_file.write(f"[t={t}] {INSIDE_KEY} = {inside_val}\n")
                     
-#                     # Convert both symbolic state dictionaries to binary arrays
-#                     binary_label_object = dict_to_binary_array(object_relations)
-#                     binary_label_action = dict_to_binary_array(action_states)
+                    assert objrel_vec.shape[0] == NUM_OBJREL
+                    assert set(np.unique(objrel_vec)).issubset({-1, 0, 1})
+                    actsub_vec = actsub_dict_to_vec(action_det_detector.detect_binary_states())
+                    assert actsub_vec.shape[0] == NUM_ACTSUB
+                    assert set(np.unique(actsub_vec)).issubset({-1, 0, 1})
 
-#                     # Append the binary labels to their respective lists
-#                     episode_symbolic_states_object.append(binary_label_object)
-#                     episode_symbolic_states_action.append(binary_label_action)
+                    
 
-#                     # if hasattr(core_env, "parsed_problem"):
-#                     #     print("Parsed problem structure:")
-#                     #     for key, value in core_env.parsed_problem.items():
-#                     #         print(f"Key: {key}, Type: {type(value)}, Example: {repr(value)[:200]}")
-
-#                     # Log all object states
-#                     # if hasattr(core_env, "object_states_dict"):
-#                     #     print(f"Object states after step {t}:")
-#                     #     for obj_name, obj_state in core_env.object_states_dict.items():
-#                     #         print(f"  {obj_name}: {vars(obj_state)}")
-                        
-#                     if done:
-#                         task_successes += 1
-#                         total_successes += 1
-#                         break
-#                     t += 1
-
-#                 except Exception as e:
-#                     print(f"Caught exception: {e}")
-#                     log_file.write(f"Caught exception: {e}\n")
-#                     break
-
-#             task_episodes += 1
-#             total_episodes += 1
-#             # print("Watch this:")
-#             # print(symbolic_state['on akita_black_bowl_2 plate_1'])
-
-#             # Save per-action data for the episode
-#             if episode_embeddings and episode_symbolic_states:
-#                 log_file.write(f"Saving per-action data for episode {total_episodes}...\n")
-#                 log_file.flush()
-#                 # Save per-action embeddings and labels
-#                 if cfg.local_log_dir:
-#                     os.makedirs(cfg.local_log_dir, exist_ok=True)
-#                     log_file_episode = os.path.join(cfg.local_log_dir, f"episode_{total_episodes}.pt")
-#                     torch.save({
-#                         "visual_semantic_encoding": episode_embeddings,  # Dict[layer_idx, list of embeddings]
-#                         "symbolic_state": torch.FloatTensor(episode_symbolic_states)  # Shape: (num_actions, 96)
-#                     }, log_file_episode)
-#                     print(f"Per-action embeddings and labels saved to: {log_file_episode}")
-#                     log_file.write(f"Per-action embeddings and labels saved to: {log_file_episode}\n")
-#             else:
-#                 print("Warning: No embeddings or symbolic states collected for this episode.")
-#                 log_file.write("Warning: No embeddings or symbolic states collected for this episode.\n")
+                    # Append to episode buffers
+                    for L, e in embeds.items():
+                        episode_embeds[L].append(e)
+                    episode_objrel.append(objrel_vec)
+                    episode_actsub.append(actsub_vec)
+                    # ----------------------------------------------------------------------------- 
 
 
-#             # Save a replay video of the episode
-#             save_rollout_video(
-#                 replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
-#             )
+                    # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
+                    action = normalize_gripper_action(action, binarize=True)
 
-#             # Log current results
-#             print(f"Success: {done}")
-#             print(f"# episodes completed so far: {total_episodes}")
-#             print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
-#             log_file.write(f"Success: {done}\n")
-#             log_file.write(f"# episodes completed so far: {total_episodes}\n")
-#             log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
-#             log_file.flush()
+                    # [OpenVLA] The dataloader flips the sign of the gripper action to align with other datasets
+                    # (0 = close, 1 = open), so flip it back (-1 = open, +1 = close) before executing the action
+                    if cfg.model_family == "openvla":
+                        action = invert_gripper_action(action)
 
-#         # Log final results
-#         print(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
-#         print(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
-#         log_file.write(f"Current task success rate: {float(task_successes) / float(task_episodes)}\n")
-#         log_file.write(f"Current total success rate: {float(total_successes) / float(total_episodes)}\n")
-#         log_file.flush()
-#         if cfg.use_wandb:
-#             wandb.log(
-#                 {
-#                     f"success_rate/{task_description}": float(task_successes) / float(task_episodes),
-#                     f"num_episodes/{task_description}": task_episodes,
-#                 }
-#             )
+                    # Execute action in environment
 
-#     # Push total metrics and local log file to wandb
-#     if cfg.use_wandb:
-#         wandb.log(
-#             {
-#                 "success_rate/total": float(total_successes) / float(total_episodes),
-#                 "num_episodes/total": total_episodes,
-#             }
-#         )
-#         wandb.save(local_log_filepath)
-        
-#     # Save local log file
-#     log_file.close()
+                    action_to_send = action.tolist()          # always use the policy’s action
+
+                    obs, reward, done, info = env.step(action_to_send)
+
+                    if done and not success_reached:          # first time we see done=True
+                        success_reached   = True
+                        steps_after_success = 0
+                        task_successes   += 1      # ← NEW
+                        total_successes  += 1      # ← NEW
+                    
+                    if success_reached:
+                        steps_after_success += 1
+                        if steps_after_success >= EXTRA_STEPS_AFTER_SUCCESS:
+                            break        # leave the while-loop after 3 s of extra frames
+       
+                    t += 1
+
+                except Exception as e:
+                    print(f"Caught exception: {e}")
+                    log_file.write(f"Caught exception: {e}\n")
+                    break
+
+            task_episodes += 1
+            total_episodes += 1
+
+            # Save a replay video of the episode
+            save_rollout_video(
+                replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
+            )
+
+            # ▲ NEW ────────────────────────────────────────────────────────────────────────
+            if any(len(v) for v in episode_embeds.values()):
+                save_dict = {
+                    "visual_semantic_encoding": {L: torch.tensor(v) for L, v in episode_embeds.items()},
+                    "symbolic_state_object_relations": torch.tensor(np.array(episode_objrel)),
+                    "symbolic_state_action_subgoals":   torch.tensor(np.array(episode_actsub)),
+                }
+                os.makedirs(cfg.local_log_dir, exist_ok=True)
+                save_fp = os.path.join(cfg.local_log_dir, f"episode_{total_episodes}.pt")
+                torch.save(save_dict, save_fp)
+                log_file.write(f"Per-action embeddings & states saved to {save_fp}\n")
+            # ───────────────────────────────────────────────────────────────────────────────
+
+            # Log current results
+            print(f"Success: {done}")
+            print(f"# episodes completed so far: {total_episodes}")
+            print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
+            log_file.write(f"Success: {done}\n")
+            log_file.write(f"# episodes completed so far: {total_episodes}\n")
+            log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
+            log_file.flush()
+
+        # Log final results
+        print(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
+        print(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
+        log_file.write(f"Current task success rate: {float(task_successes) / float(task_episodes)}\n")
+        log_file.write(f"Current total success rate: {float(total_successes) / float(total_episodes)}\n")
+        log_file.flush()
+        if cfg.use_wandb:
+            wandb.log(
+                {
+                    f"success_rate/{task_description}": float(task_successes) / float(task_episodes),
+                    f"num_episodes/{task_description}": task_episodes,
+                }
+            )
+
+    # Save local log file
+    log_file.close()
+
+    # Push total metrics and local log file to wandb
+    if cfg.use_wandb:
+        wandb.log(
+            {
+                "success_rate/total": float(total_successes) / float(total_episodes),
+                "num_episodes/total": total_episodes,
+            }
+        )
+        wandb.save(local_log_filepath)
 
 
-# if __name__ == "__main__":
-#     eval_libero()
+if __name__ == "__main__":
+    eval_libero()

@@ -1,3 +1,0 @@
-Task suite: libero_10
-Server startup complete.
-Server shutting down.

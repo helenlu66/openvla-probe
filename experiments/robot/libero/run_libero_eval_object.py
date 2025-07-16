@@ -21,16 +21,6 @@ Usage:
 import os
 os.environ["MUJOCO_GL"] = "egl"
 
-
-# import OpenGL
-# OpenGL.ERROR_CHECKING = False
-
-# import OpenGL.raw.EGL._errors
-# from OpenGL.raw.EGL._errors import _ErrorChecker
-# OpenGL.raw.EGL._errors._error_checker = _ErrorChecker
-
-
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +76,12 @@ def actsub_dict_to_vec(d):
         if k in actsub_key2idx:
             v[actsub_key2idx[k]] = val
     return v
+
+def stack_list(v):
+    if isinstance(v[0], np.ndarray):
+        return torch.from_numpy(np.stack(v, axis=0))
+    else:                       # assume torch.Tensor
+        return torch.stack(v, dim=0)
 # ───────────────────────────────────────────────────────────────────────────────
 
 
@@ -360,7 +356,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             # ▲ NEW ────────────────────────────────────────────────────────────────────────
             if any(len(v) for v in episode_embeds.values()):
                 save_dict = {
-                    "visual_semantic_encoding": {L: torch.tensor(v) for L, v in episode_embeds.items()},
+                    "visual_semantic_encoding": {L: stack_list(v) for L, v in episode_embeds.items()},
                     "symbolic_state_object_relations": torch.tensor(np.array(episode_objrel)),
                     "symbolic_state_action_subgoals":   torch.tensor(np.array(episode_actsub)),
                 }

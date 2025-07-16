@@ -18,16 +18,13 @@ Usage:
         --wandb_entity <ENTITY>
 """
 
-import os
-os.environ["MUJOCO_GL"] = "egl"
 
+import OpenGL
+OpenGL.ERROR_CHECKING = False
 
-# import OpenGL
-# OpenGL.ERROR_CHECKING = False
-
-# import OpenGL.raw.EGL._errors
-# from OpenGL.raw.EGL._errors import _ErrorChecker
-# OpenGL.raw.EGL._errors._error_checker = _ErrorChecker
+import OpenGL.raw.EGL._errors
+from OpenGL.raw.EGL._errors import _ErrorChecker
+OpenGL.raw.EGL._errors._error_checker = _ErrorChecker
 
 
 import os
@@ -51,10 +48,11 @@ from detection.libero_object_action_state_subgoal_detector import LiberoObjectAc
 # ▲ NEW ────────────────────────────────────────────────────────────────────────
 # Which hidden layers to probe. 0 = embedding, 1-32 = Llama blocks.
 DESIRED_LAYER_INDICES = list(range(33))
+# DESIRED_LAYER_INDICES = [0, 7, 15, 23, 31]   #   5 checkpoints through the stack
 
-# Text files that list every symbolic key we may see (-1/0/1 labels)
-OBJREL_KEYS_FILE   = "./experiments/robot/libero/object_object_relations_keys.txt"
-ACTSUB_KEYS_FILE   = "./experiments/robot/libero/object_action_states_keys.txt"
+# Text files that list every symbolic key we may see (0/1 labels)
+OBJREL_KEYS_FILE   = "./experiments/robot/libero/spatial_object_relations_keys.txt"
+ACTSUB_KEYS_FILE   = "./experiments/robot/libero/spatial_action_states_keys.txt"
 
 import ast
 with open(OBJREL_KEYS_FILE) as f:
@@ -126,7 +124,7 @@ class GenerateConfig:
     #################################################################################################################
     # LIBERO environment-specific parameters
     #################################################################################################################
-    task_suite_name: str = "libero_object"          # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+    task_suite_name: str = "libero_spatial"          # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
     num_trials_per_task: int = 6                    # Number of rollouts per task
 
@@ -210,6 +208,10 @@ def eval_libero(cfg: GenerateConfig) -> None:
         # Get default LIBERO initial states
         initial_states = task_suite.get_task_init_states(task_id)
 
+        rng = np.random.default_rng(cfg.seed + task_id)      # task-specific but reproducible
+        perm = rng.permutation(len(initial_states))          # new ordering
+        initial_states = [initial_states[i] for i in perm]   # shuffled in-place
+        
         # Initialize LIBERO environment and task description
         env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
 

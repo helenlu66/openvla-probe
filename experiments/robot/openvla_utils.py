@@ -42,7 +42,7 @@ def get_vla(cfg):
 
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.pretrained_checkpoint,
-        # attn_implementation="flash_attention_2",
+        attn_implementation="flash_attention_2",
         torch_dtype=torch.bfloat16,
         load_in_8bit=cfg.load_in_8bit,
         load_in_4bit=cfg.load_in_4bit,
@@ -123,13 +123,26 @@ def crop_and_resize(image, crop_scale, batch_size):
 
     return image
 
+def pool_tokens(tokens, method="mean"):
+    # tokens: (B, T, D)
+    if method == "mean":
+        pooled = tokens.mean(1)          # (B, D)
+    else:                                # "final" token
+        pooled = tokens[:, -1]           # (B, D)
+
+    # ---- safety guard --------------------------------------------------
+    assert pooled.shape[0] == 1, (
+        f"Expected batch=1, got {pooled.shape[0]}. "
+        "Either vectorise downstream or change pooling.")
+    return pooled.squeeze(0)             # (D,)
+
 
 def get_vla_action(
     vla, processor, base_vla_name, obs, task_label, unnorm_key,
     center_crop=False,
     *,                       # ⬅️ force kwargs for the new args
     layer_indices=None,
-    pooling_method="final_token",
+    pooling_method="mean",
     return_embeddings=False,  # <-- NEW flag, default False
 ):
     """Generates an action with the VLA policy."""
@@ -178,11 +191,10 @@ def get_vla_action(
         # collect embeddings only if caller asks
         if return_embeddings:
             embeds = {
-                idx: (
-                    outs.hidden_states[idx if idx >= 0 else len(outs.hidden_states)+idx]
-                    .float()[:, -1, :]           # or mean-pool here
-                    .squeeze(0).cpu().numpy()
-                )
+                idx: pool_tokens(
+                        outs.hidden_states[idx if idx >= 0 else len(outs.hidden_states)+idx].float(),
+                        method=pooling_method,   # "mean" (default) or "final"
+                    ).cpu().numpy()              # (D,)
                 for idx in (layer_indices or (-1,))
             }
 
